@@ -1,0 +1,20 @@
+[Unit]
+Description=autossh SOCKS tunnel %i
+ConditionPathExists=%h/.config/autotunnel/%i.conf
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/autotunnel/%i.conf
+# keep retrying even if the very first connect fails (e.g. booted offline)
+Environment=AUTOSSH_GATETIME=0
+# -M 0 disables only autossh's monitor port (NOT ssh ControlMaster); liveness comes
+# from ServerAliveInterval in ~/.ssh/config. ControlMaster/ControlPath are left to
+# ~/.ssh/config on purpose, so the tunnel acts as mux master for other ssh sessions.
+ExecStart=/usr/bin/autossh -M 0 -N \
+    -o ExitOnForwardFailure=yes -o BatchMode=yes \
+    $SSH_OPTS -D ${LISTEN} ${DEST}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
