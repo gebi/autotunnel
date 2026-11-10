@@ -23,6 +23,8 @@ ExecStart=/bin/sh -c '\
         $$SSH_OPTS -D "$$LISTEN" "$$DEST"'
 Restart=always
 RestartSec=10
+# autossh exits 1 on SIGTERM; don't report a normal stop/restart as failed
+SuccessExitStatus=1
 
 [Install]
 WantedBy=default.target
