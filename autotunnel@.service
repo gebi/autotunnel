@@ -4,15 +4,23 @@ ConditionPathExists=%h/.config/autotunnel/%i.conf
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/autotunnel/%i.conf
+# ssh-agent from keychain (https://www.funtoo.org/Keychain) instead of whatever agent
+# systemd's user environment points to (e.g. gcr-ssh-agent, which pops up prompts).
+# %l = short hostname, matching keychain's file naming. Set KEYCHAIN_ENV= (empty) in a
+# conf to skip it. If the file is missing, the service fails and is retried later.
+Environment=KEYCHAIN_ENV=%h/.keychain/%l-sh
 # keep retrying even if the very first connect fails (e.g. booted offline)
 Environment=AUTOSSH_GATETIME=0
+EnvironmentFile=%h/.config/autotunnel/%i.conf
 # -M 0 disables only autossh's monitor port (NOT ssh ControlMaster); liveness comes
 # from ServerAliveInterval in ~/.ssh/config. ControlMaster/ControlPath are left to
 # ~/.ssh/config on purpose, so the tunnel acts as mux master for other ssh sessions.
-ExecStart=/usr/bin/autossh -M 0 -N \
-    -o ExitOnForwardFailure=yes -o BatchMode=yes \
-    $SSH_OPTS -D ${LISTEN} ${DEST}
+# ($$ = shell variable, expanded by sh, not by systemd)
+ExecStart=/bin/sh -c '\
+    if [ -n "$$KEYCHAIN_ENV" ]; then . "$$KEYCHAIN_ENV" || exit 1; fi; \
+    exec /usr/bin/autossh -M 0 -N \
+        -o ExitOnForwardFailure=yes -o BatchMode=yes \
+        $$SSH_OPTS -D "$$LISTEN" "$$DEST"'
 Restart=always
 RestartSec=10
 

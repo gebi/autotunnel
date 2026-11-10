@@ -26,7 +26,7 @@ One file per tunnel: `~/.config/autotunnel/NAME.conf` (see `examples/example.con
     DEST=user@jumphost.example.com
     # SSH_OPTS="-p 2222"   # optional extra ssh args
 
-runs `autossh -M 0 -N -o ExitOnForwardFailure=yes -o BatchMode=yes $SSH_OPTS -D $LISTEN $DEST`.
+runs (after sourcing the keychain env, see below) `autossh -M 0 -N -o ExitOnForwardFailure=yes -o BatchMode=yes $SSH_OPTS -D $LISTEN $DEST`.
 After editing a conf: `systemctl --user restart autotunnel@NAME`.
 
 ## Usage
@@ -45,9 +45,22 @@ To keep tunnels running without being logged in: `loginctl enable-linger $USER`.
   same host. `-M 0` only disables autossh's monitor port, not ssh multiplexing.
 - When a tunnel restarts, sessions multiplexed over it drop too. If a master for the host
   already exists when the tunnel starts, the tunnel attaches to it as a mux client.
-- `BatchMode=yes`: auth must work non-interactively. With a passphrase-protected key the
-  service needs the agent socket, e.g. `systemctl --user import-environment SSH_AUTH_SOCK`
-  (or `SSH_AUTH_SOCK=...` in the conf).
+- `BatchMode=yes`: ssh never asks for a password or passphrase. Auth must work through
+  the ssh-agent or an unencrypted key.
+
+## ssh-agent
+
+systemd user services don't inherit your login shell's `SSH_AUTH_SOCK`, and the agent that
+systemd's environment points to may be a different one (e.g. `gcr-ssh-agent`, which shows
+passphrase pop-ups). So the unit sources [keychain](https://www.funtoo.org/Keychain)'s
+env file `~/.keychain/<hostname>-sh` before starting autossh, and reuses the same agent as
+your shells.
+
+- If the file doesn't exist yet (keychain not run since boot), the service fails and
+  systemd retries every 10s until it does.
+- The agent is read at service start. If keychain starts a new agent, restart the tunnels.
+- Without keychain: set `KEYCHAIN_ENV=` (empty) in the conf and `SSH_AUTH_SOCK=/path/to/agent.sock`
+  instead, or point `KEYCHAIN_ENV` at any sh file that exports `SSH_AUTH_SOCK`.
 
 ## Future improvements
 
