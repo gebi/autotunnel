@@ -85,3 +85,9 @@ your shells.
   its connection drop when it stops idle (only SOCKS traffic counts as activity). The first
   connection also waits for the ssh handshake. So it suits only occasionally used tunnels
   that no ssh sessions share.
+
+## License
+
+Copyright 2026 Michael Gebetsroither
+
+Licensed under the Apache License 2.0, see [LICENSE](LICENSE).

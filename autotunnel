@@ -1,5 +1,6 @@
 #!/bin/bash
 # autotunnel - manage persistent autossh SOCKS tunnels (systemd user units autotunnel@NAME)
+# SPDX-License-Identifier: Apache-2.0
 set -u
 
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
