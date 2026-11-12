@@ -2,21 +2,34 @@
 
 Persistent `autossh` SOCKS tunnels as an instanceable systemd **user** unit.
 
-## Install / add a tunnel
+## Install
 
-    ./install.sh                          # install unit + status script only
-    ./install.sh [-n] [-f] NAME [PORT [DEST]]
+    ./autotunnel install
 
-Installing symlinks `autotunnel@.service` into `~/.config/systemd/user/` and
-`autotunnel-status` into `~/.local/bin/`. Pass a NAME to also create
-`~/.config/autotunnel/NAME.conf`:
+Symlinks `autotunnel@.service` into `~/.config/systemd/user/` and `autotunnel` into
+`~/.local/bin/`. (`autotunnel add` also does this if the unit isn't installed yet.)
+
+## Usage
+
+    autotunnel [status]                       # show all tunnels (default)
+    autotunnel start|stop|restart NAME... | -a
+    autotunnel enable|disable     NAME... | -a   # + start on login / don't; also starts/stops now
+    autotunnel add [-n] [-f] NAME [PORT [DEST]]
+    journalctl --user -u autotunnel@NAME -f
+
+`-a` means all tunnels: every configured one for start/restart/enable, every running one
+for stop, every known one for disable.
+
+`add` creates `~/.config/autotunnel/NAME.conf`:
 
 - `PORT`: local SOCKS port or `addr:port` (default: the first free port from 1080 up, bound to 127.0.0.1)
 - `DEST`: ssh destination, a host alias or `user@host` (default: NAME)
 - `-n`: enable and start the tunnel right away
 - `-f`: overwrite an existing conf
 
-Example: `./install.sh -n jump 1081 user@jumphost.example.com`
+Example: `autotunnel add -n jump 1081 user@jumphost.example.com`
+
+To keep tunnels running without being logged in: `loginctl enable-linger $USER`.
 
 ## Config
 
@@ -27,16 +40,7 @@ One file per tunnel: `~/.config/autotunnel/NAME.conf` (see `examples/example.con
     # SSH_OPTS="-p 2222"   # optional extra ssh args
 
 runs (after sourcing the keychain env, see below) `autossh -M 0 -N -o ExitOnForwardFailure=yes -o BatchMode=yes $SSH_OPTS -D $LISTEN $DEST`.
-After editing a conf: `systemctl --user restart autotunnel@NAME`.
-
-## Usage
-
-    systemctl --user enable --now autotunnel@NAME    # start now + on login
-    systemctl --user disable --now autotunnel@NAME
-    journalctl --user -u autotunnel@NAME -f
-    autotunnel-status
-
-To keep tunnels running without being logged in: `loginctl enable-linger $USER`.
+After editing a conf: `autotunnel restart NAME`.
 
 ## Notes
 

@@ -1,0 +1,215 @@
+#!/bin/bash
+# autotunnel - manage persistent autossh SOCKS tunnels (systemd user units autotunnel@NAME)
+set -u
+
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONF_DIR="$CFG/autotunnel"
+UNIT_DIR="$CFG/systemd/user"
+BIN_DIR="$HOME/.local/bin"
+SELF=$(readlink -f "$0")
+HERE=$(dirname "$SELF")
+
+usage() {
+    cat <<EOF
+usage: autotunnel [COMMAND] [ARGS]
+
+  status                         show all tunnels (default)
+  start   NAME... | -a           start tunnel(s); -a = all configured tunnels
+  stop    NAME... | -a           stop tunnel(s);  -a = all running tunnels
+  restart NAME... | -a           restart tunnel(s)
+  enable  NAME... | -a           enable (start on login) and start now
+  disable NAME... | -a           disable and stop now
+  add [-n] [-f] NAME [PORT [DEST]]
+                                 create ~/.config/autotunnel/NAME.conf
+      PORT  local SOCKS port or addr:port (default: first free port from 1080 up)
+      DEST  ssh destination, host alias or user@host (default: NAME)
+      -n    enable and start the tunnel right away
+      -f    overwrite an existing NAME.conf
+  install                        (re)install the systemd unit and this script
+EOF
+}
+
+die() { echo "autotunnel: $*" >&2; exit 1; }
+
+if [[ -t 1 ]]; then
+    G=$'\e[32m' R=$'\e[31m' Y=$'\e[33m' N=$'\e[0m'
+else
+    G='' R='' Y='' N=''
+fi
+
+# --- tunnel discovery -------------------------------------------------------
+
+configured() {  # names with a conf file
+    local f n
+    for f in "$CONF_DIR"/*.conf; do
+        [[ -f $f ]] || continue
+        n=${f##*/}; echo "${n%.conf}"
+    done
+}
+
+known() {  # configured + loaded/enabled units (e.g. conf removed but unit still around)
+    {
+        configured
+        systemctl --user list-units --all --plain --no-legend 'autotunnel@*' 2>/dev/null |
+            sed -n 's/^autotunnel@\(.*\)\.service .*/\1/p'
+        local f n
+        for f in "$UNIT_DIR"/*.wants/autotunnel@*.service; do
+            [[ -e $f || -L $f ]] || continue
+            n=${f##*/autotunnel@}; echo "${n%.service}"
+        done
+    } | sort -u
+}
+
+running() {
+    systemctl --user list-units --state=active,activating,reloading --plain --no-legend 'autotunnel@*' 2>/dev/null |
+        sed -n 's/^autotunnel@\(.*\)\.service .*/\1/p'
+}
+
+conf_get() {  # conf_get FILE KEY
+    sed -n "s/^[[:space:]]*$2=//p" "$1" | tail -n1 | tr -d "\"'"
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_status() {
+    local names name unit listen dest conf enabled active
+    mapfile -t names < <(known)
+    if (( ${#names[@]} == 0 )); then
+        echo "no tunnels configured in $CONF_DIR (add one with: autotunnel add NAME)" >&2
+        return 1
+    fi
+    printf '%-16s %-22s %-28s %-9s %-9s\n' NAME LISTEN DEST ENABLED ACTIVE
+    for name in "${names[@]}"; do
+        unit="autotunnel@${name}.service"
+        listen='-' dest='-'
+        conf="$CONF_DIR/$name.conf"
+        if [[ -r $conf ]]; then
+            listen=$(conf_get "$conf" LISTEN)
+            dest=$(conf_get "$conf" DEST)
+        else
+            dest="${R}(conf missing)${N}"
+        fi
+        enabled=$(systemctl --user is-enabled "$unit" 2>/dev/null); enabled=${enabled:-disabled}
+        active=$(systemctl --user is-active "$unit" 2>/dev/null); active=${active:-inactive}
+        printf '%-16s %-22s %-28s %s %s\n' "$name" "${listen:--}" "${dest:--}" \
+            "$(color "$enabled")" "$(color "$active")"
+    done
+}
+
+color() {
+    case "$1" in
+        enabled|active) printf '%s%-9s%s' "$G" "$1" "$N" ;;
+        activating|reloading|deactivating|enabled-runtime|static|indirect) printf '%s%-9s%s' "$Y" "$1" "$N" ;;
+        *) printf '%s%-9s%s' "$R" "$1" "$N" ;;
+    esac
+}
+
+cmd_ctl() {  # cmd_ctl ACTION NAME...|-a
+    local action=$1; shift
+    local names=() name units=()
+    if [[ ${1:-} == -a ]]; then
+        (( $# == 1 )) || die "$action: -a takes no tunnel names"
+        case $action in
+            stop) mapfile -t names < <(running) ;;
+            disable) mapfile -t names < <(known) ;;
+            *) mapfile -t names < <(configured) ;;
+        esac
+        (( ${#names[@]} )) || { echo "nothing to $action"; return 0; }
+    else
+        (( $# )) || die "$action: give tunnel name(s) or -a"
+        names=("$@")
+    fi
+    for name in "${names[@]}"; do
+        if [[ $action =~ ^(start|restart|enable)$ ]]; then
+            [[ -r $CONF_DIR/$name.conf ]] || die "$action: no such tunnel '$name' ($CONF_DIR/$name.conf missing)"
+        elif ! known | grep -qxF -- "$name"; then
+            die "$action: no such tunnel '$name'"
+        fi
+        units+=("autotunnel@$name.service")
+    done
+    case $action in
+        enable|disable) systemctl --user "$action" --now "${units[@]}" ;;
+        *) systemctl --user "$action" "${units[@]}" ;;
+    esac || return
+    echo "${action}: ${names[*]}"
+}
+
+cmd_install() {
+    [[ -f $HERE/autotunnel@.service ]] || die "install: autotunnel@.service not found next to $SELF"
+    mkdir -p "$UNIT_DIR" "$BIN_DIR" "$CONF_DIR"
+    ln -sfn "$HERE/autotunnel@.service" "$UNIT_DIR/autotunnel@.service"
+    ln -sfn "$SELF" "$BIN_DIR/autotunnel"
+    # drop the link from the old script name
+    local old=$BIN_DIR/autotunnel-status
+    if [[ -L $old ]] && { [[ ! -e $old ]] || [[ $(readlink -f "$old") == "$HERE"/* ]]; }; then
+        rm -f "$BIN_DIR/autotunnel-status"
+    fi
+    systemctl --user daemon-reload
+    echo "installed: $UNIT_DIR/autotunnel@.service, $BIN_DIR/autotunnel"
+}
+
+port_used() {  # port_used PORT [CONF_TO_IGNORE]: used by another conf or currently listening
+    local f
+    for f in "$CONF_DIR"/*.conf; do
+        [[ -f $f && $f != "${2:-}" ]] || continue
+        grep -qE "^[[:space:]]*LISTEN=[\"']?([^:]*:)?$1[\"']?[[:space:]]*\$" "$f" && return 0
+    done
+    command -v ss >/dev/null && [[ -n $(ss -Hltn "sport = :$1") ]]
+}
+
+cmd_add() {
+    local now=0 force=0 opt OPTIND=1
+    while getopts nf opt; do
+        case $opt in
+            n) now=1 ;;
+            f) force=1 ;;
+            *) usage >&2; exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+    (( $# >= 1 && $# <= 3 )) || die "usage: autotunnel add [-n] [-f] NAME [PORT [DEST]]"
+
+    local name=$1 port=${2:-} dest=${3:-$1} conf listen
+    [[ $name =~ ^[A-Za-z0-9_.-]+$ ]] || die "invalid NAME '$name' (allowed: A-Z a-z 0-9 _ . -)"
+    conf="$CONF_DIR/$name.conf"
+    [[ -e $conf && $force -eq 0 ]] && die "$conf already exists (use -f to overwrite)"
+
+    # make sure the unit is installed
+    [[ -e $UNIT_DIR/autotunnel@.service ]] || cmd_install
+
+    if [[ -z $port ]]; then
+        port=1080
+        while port_used "$port" "$conf"; do port=$((port + 1)); done
+    fi
+    [[ $port == *:* ]] && listen=$port || listen="127.0.0.1:$port"
+    port=${listen##*:}
+    if [[ ! $port =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        die "invalid PORT '$port'"
+    fi
+    port_used "$port" "$conf" && echo "warning: port $port is already used by another tunnel or listener" >&2
+
+    mkdir -p "$CONF_DIR"
+    printf 'LISTEN=%s\nDEST=%s\n' "$listen" "$dest" > "$conf"
+    echo "created $conf: -D $listen $dest"
+
+    if (( now )); then
+        systemctl --user enable "autotunnel@$name"
+        systemctl --user restart "autotunnel@$name"   # also picks up a changed conf (-f)
+        echo "enabled and started autotunnel@$name"
+    else
+        echo "start it with:  autotunnel enable $name   (or: autotunnel start $name)"
+    fi
+}
+
+# --- main -------------------------------------------------------------------
+
+cmd=${1:-status}
+(( $# )) && shift
+case $cmd in
+    status) cmd_status ;;
+    start|stop|restart|enable|disable) cmd_ctl "$cmd" "$@" ;;
+    add) cmd_add "$@" ;;
+    install) cmd_install ;;
+    -h|--help|help) usage ;;
+    *) usage >&2; exit 1 ;;
+esac
