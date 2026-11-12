@@ -17,6 +17,11 @@ Symlinks `autotunnel@.service` into `~/.config/systemd/user/` and `autotunnel` i
     autotunnel add [-n] [-f] NAME [PORT [DEST]]
     journalctl --user -u autotunnel@NAME -f
 
+The TUNNEL column in `status` shows whether the tunnel actually works, beyond systemd's ACTIVE:
+`up` (our ssh listens on LISTEN and a SOCKS connect through it reaches the remote), `stale`
+(listening, but the remote doesn't answer within 3s), `down` (nothing listening, e.g. ssh still
+connecting or failing auth), `conflict` (the port is held by another process).
+
 `-a` means all tunnels: every configured one for start/restart/enable, every running one
 for stop, every known one for disable.
 

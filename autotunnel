@@ -71,35 +71,101 @@ conf_get() {  # conf_get FILE KEY
 
 # --- commands ---------------------------------------------------------------
 
+socks_probe() {  # socks_probe HOST PORT -> up|stale
+    # SOCKS5 CONNECT through the tunnel to the remote's localhost:22, then wait for a reply.
+    # OpenSSH answers the SOCKS request locally right away, so only what comes after proves
+    # the remote is reachable: data (the ssh banner) or EOF (remote rejected the channel,
+    # e.g. nothing on localhost:22 there) -> up; silence -> stale (hung connection).
+    local LC_ALL=C host=$1 port=$2 fd c b n rc
+    { exec {fd}<>"/dev/tcp/$host/$port"; } 2>/dev/null || { echo down; return; }
+    rb() {  # read one byte into b (decimal); NUL reads as an empty string
+        c=''
+        IFS= read -r -d '' -n 1 -t 3 -u "$fd" c || return
+        if [[ -z $c ]]; then b=0; else printf -v b '%d' "'$c"; fi
+    }
+    skip() { local i; for ((i = 0; i < $1; i++)); do rb || return; done; }
+    probe() {
+        printf '\x05\x01\x00' >&"$fd" || return 1
+        rb && (( b == 5 )) && rb && (( b == 0 )) || return 1
+        printf '\x05\x01\x00\x03\x09localhost\x00\x16' >&"$fd" || return 1
+        rb && (( b == 5 )) && rb && (( b == 0 )) && rb && rb || return 1
+        case $b in
+            1) skip 6 ;;
+            4) skip 18 ;;
+            3) rb && n=$b && skip $((n + 2)) ;;
+            *) return 1 ;;
+        esac || return 1
+        rb; rc=$?
+        (( rc == 0 || rc == 1 ))  # data or EOF; >128 = timeout
+    }
+    if probe; then echo up; else echo stale; fi
+    exec {fd}>&-
+}
+
+tunnel_state() {  # tunnel_state NAME LISTEN ACTIVE -> up|stale|down|conflict|-|?
+    local name=$1 listen=$2 active=$3 host port cg p
+    [[ -n $listen && $listen != - ]] || { echo -; return; }
+    [[ $active == active ]] || { echo down; return; }
+    command -v ss >/dev/null || { echo '?'; return; }
+    port=${listen##*:}
+    host=${listen%:*}
+    [[ $host == "$listen" ]] && host=127.0.0.1
+    host=${host#[}; host=${host%]}
+    case $host in ''|'*'|0.0.0.0) host=127.0.0.1 ;; ::) host=::1 ;; esac
+
+    local -A ours=()
+    cg=$(systemctl --user show -p ControlGroup --value "autotunnel@$name.service" 2>/dev/null)
+    if [[ -n $cg && -r /sys/fs/cgroup$cg/cgroup.procs ]]; then
+        while read -r p; do ours[$p]=1; done < "/sys/fs/cgroup$cg/cgroup.procs"
+    fi
+    local listeners
+    listeners=$(ss -Hltnp "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u)
+    [[ -n $listeners ]] || { echo down; return; }
+    for p in $listeners; do
+        [[ -n ${ours[$p]:-} ]] && { socks_probe "$host" "$port"; return; }
+    done
+    echo conflict
+}
+
 cmd_status() {
-    local names name unit listen dest conf enabled active
+    local names name unit conf i tmp
+    local -a t_listen t_dest t_enabled t_active
     mapfile -t names < <(known)
     if (( ${#names[@]} == 0 )); then
         echo "no tunnels configured in $CONF_DIR (add one with: autotunnel add NAME)" >&2
         return 1
     fi
-    printf '%-16s %-22s %-28s %-9s %-9s\n' NAME LISTEN DEST ENABLED ACTIVE
-    for name in "${names[@]}"; do
+    tmp=$(mktemp -d) || return
+    # shellcheck disable=SC2064  # expand now, $tmp is local
+    trap "rm -rf '$tmp'" EXIT
+    for i in "${!names[@]}"; do
+        name=${names[i]}
         unit="autotunnel@${name}.service"
-        listen='-' dest='-'
+        t_listen[i]='-' t_dest[i]='-'
         conf="$CONF_DIR/$name.conf"
         if [[ -r $conf ]]; then
-            listen=$(conf_get "$conf" LISTEN)
-            dest=$(conf_get "$conf" DEST)
+            t_listen[i]=$(conf_get "$conf" LISTEN)
+            t_dest[i]=$(conf_get "$conf" DEST)
         else
-            dest="${R}(conf missing)${N}"
+            t_dest[i]="${R}(conf missing)${N}"
         fi
-        enabled=$(systemctl --user is-enabled "$unit" 2>/dev/null); enabled=${enabled:-disabled}
-        active=$(systemctl --user is-active "$unit" 2>/dev/null); active=${active:-inactive}
-        printf '%-16s %-22s %-28s %s %s\n' "$name" "${listen:--}" "${dest:--}" \
-            "$(color "$enabled")" "$(color "$active")"
+        t_enabled[i]=$(systemctl --user is-enabled "$unit" 2>/dev/null); t_enabled[i]=${t_enabled[i]:-disabled}
+        t_active[i]=$(systemctl --user is-active "$unit" 2>/dev/null); t_active[i]=${t_active[i]:-inactive}
+        tunnel_state "$name" "${t_listen[i]}" "${t_active[i]}" > "$tmp/$i" &  # probes run in parallel
+    done
+    wait
+    printf '%-16s %-22s %-28s %-9s %-9s %s\n' NAME LISTEN DEST ENABLED ACTIVE TUNNEL
+    for i in "${!names[@]}"; do
+        printf '%-16s %-22s %-28s %s %s %s\n' "${names[i]}" "${t_listen[i]:--}" "${t_dest[i]:--}" \
+            "$(color "${t_enabled[i]}")" "$(color "${t_active[i]}")" "$(color "$(< "$tmp/$i")")"
     done
 }
 
 color() {
     case "$1" in
-        enabled|active) printf '%s%-9s%s' "$G" "$1" "$N" ;;
-        activating|reloading|deactivating|enabled-runtime|static|indirect) printf '%s%-9s%s' "$Y" "$1" "$N" ;;
+        enabled|active|up) printf '%s%-9s%s' "$G" "$1" "$N" ;;
+        activating|reloading|deactivating|enabled-runtime|static|indirect|stale|conflict|'?') printf '%s%-9s%s' "$Y" "$1" "$N" ;;
+        -) printf '%-9s' "$1" ;;
         *) printf '%s%-9s%s' "$R" "$1" "$N" ;;
     esac
 }
