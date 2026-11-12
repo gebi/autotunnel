@@ -25,6 +25,17 @@ connecting or failing auth), `conflict` (the port is held by another process).
 `-a` means all tunnels: every configured one for start/restart/enable, every running one
 for stop, every known one for disable.
 
+`start`/`stop` only change whether a tunnel runs *right now*. `enable`/`disable` change
+whether it starts automatically with your systemd user session (login, or boot with lingering),
+and also start/stop it immediately. Status shows them as ENABLED and ACTIVE:
+
+| ENABLED  | ACTIVE   | what it means |
+|----------|----------|---------------|
+| enabled  | active   | normal permanent tunnel |
+| enabled  | inactive | `stop`ped for now; comes back at next login |
+| disabled | active   | `start`ed for a one-off; gone after logout or reboot |
+| disabled | inactive | configured but unused |
+
 `add` creates `~/.config/autotunnel/NAME.conf`:
 
 - `PORT`: local SOCKS port or `addr:port` (default: the first free port from 1080 up, bound to 127.0.0.1)
